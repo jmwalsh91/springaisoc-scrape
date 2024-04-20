@@ -8,6 +8,7 @@ import (
 	"net/http/cookiejar"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
@@ -35,28 +36,37 @@ func generateURL(page int) string {
 	return fmt.Sprintf("https://link.springer.com/search/page/%d?query=&search-within=Journal&package=openaccessarticles&facet-journal-id=146", page)
 }
 
-func findPDFLinks(client *http.Client, pageURL string) ([]string, error) {
+func sanitizeFileName(name string) string {
+	reg := regexp.MustCompile(`[\\/:*?"<>|]`)
+	safeName := reg.ReplaceAllString(name, "")
+	return strings.TrimSpace(safeName)
+}
+
+func findPDFLinksAndTitles(client *http.Client, pageURL string) ([]string, []string, error) {
 	resp, err := client.Get(pageURL)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 
 	doc, err := goquery.NewDocumentFromReader(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var links []string
-	doc.Find("a.pdf-link").Each(func(i int, s *goquery.Selection) {
-		href, exists := s.Attr("href")
-		if exists && strings.Contains(href, ".pdf") {
-			fullLink := "https://link.springer.com" + href
+	var titles []string
+	doc.Find("li").Each(func(i int, s *goquery.Selection) {
+		title := s.Find("a.title").Text()
+		pdfLink, exists := s.Find("a.pdf-link").Attr("href")
+		if exists && strings.Contains(pdfLink, ".pdf") {
+			fullLink := "https://link.springer.com" + pdfLink
 			links = append(links, fullLink)
+			titles = append(titles, sanitizeFileName(title))
 		}
 	})
 
-	return links, nil
+	return links, titles, nil
 }
 
 func downloadPDF(client *http.Client, pdfURL, filePath string) error {
@@ -92,15 +102,16 @@ func main() {
 	for i := *startPage; i <= *endPage; i++ {
 		pageURL := generateURL(i)
 		fmt.Println("Processing:", pageURL)
-		pdfLinks, err := findPDFLinks(client, pageURL)
+		pdfLinks, titles, err := findPDFLinksAndTitles(client, pageURL)
 		if err != nil {
 			fmt.Println("Failed to find PDF links for page", i, ":", err)
 			continue
 		}
 
 		for j, link := range pdfLinks {
-			fmt.Println("Downloading PDF from:", link)
-			fileName := fmt.Sprintf("journal-page-%d-document-%d.pdf", i, j+1)
+			title := titles[j]
+			fmt.Println("Downloading PDF from:", link, "Title:", title)
+			fileName := fmt.Sprintf("%s.pdf", title)
 			filePath := filepath.Join(*outputDir, fileName)
 			err = downloadPDF(client, link, filePath)
 			if err != nil {
